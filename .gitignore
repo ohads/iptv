@@ -49,3 +49,6 @@ yuval
 
 # Unrelated tooling
 .github/modernize/
+
+# Local Xtream credentials (copy credentials.example.json)
+credentials.json

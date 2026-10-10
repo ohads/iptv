@@ -9,13 +9,18 @@
       "type": "dart",
       "program": "lib/main.dart",
       "deviceId": "chrome",
-      "args": ["--web-port", "60111"]
+      "args": [
+        "--web-port",
+        "60111",
+        "--dart-define-from-file=credentials.json"
+      ]
     },
     {
       "name": "xtream_player",
       "request": "launch",
       "type": "dart",
-      "program": "lib/main.dart"
+      "program": "lib/main.dart",
+      "args": ["--dart-define-from-file=credentials.json"]
     }
   ]
 }

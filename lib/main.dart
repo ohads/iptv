@@ -21,6 +21,12 @@ const _pinnedCategoriesKey = 'pinned_categories';
 const _volumeKey = 'player_volume';
 const _mutedKey = 'player_muted';
 
+// Fallbacks used until credentials are saved in the app. Supplied at build
+// time from the git-ignored credentials.json via --dart-define-from-file.
+const _defaultServerUrl = String.fromEnvironment('XTREAM_SERVER_URL');
+const _defaultUsername = String.fromEnvironment('XTREAM_USERNAME');
+const _defaultPassword = String.fromEnvironment('XTREAM_PASSWORD');
+
 void main() {
   runApp(const XtreamPlayerApp());
 }
@@ -1222,9 +1228,12 @@ class _XtreamSettingsSheetState extends State<XtreamSettingsSheet> {
     final prefs = await _prefsOrNull();
     if (prefs == null || !mounted) return;
     setState(() {
-      _serverController.text = prefs.getString(_serverUrlKey) ?? '';
-      _usernameController.text = prefs.getString(_usernameKey) ?? '';
-      _passwordController.text = prefs.getString(_passwordKey) ?? '';
+      _serverController.text =
+          prefs.getString(_serverUrlKey) ?? _defaultServerUrl;
+      _usernameController.text =
+          prefs.getString(_usernameKey) ?? _defaultUsername;
+      _passwordController.text =
+          prefs.getString(_passwordKey) ?? _defaultPassword;
     });
   }
 
@@ -2662,11 +2671,11 @@ class XtreamCredentials {
 
   static Future<XtreamCredentials?> load() async {
     final prefs = await _prefsOrNull();
-    if (prefs == null) return null;
 
-    final baseUrl = normalize(prefs.getString(_serverUrlKey) ?? '');
-    final username = prefs.getString(_usernameKey) ?? '';
-    final password = prefs.getString(_passwordKey) ?? '';
+    final baseUrl =
+        normalize(prefs?.getString(_serverUrlKey) ?? _defaultServerUrl);
+    final username = prefs?.getString(_usernameKey) ?? _defaultUsername;
+    final password = prefs?.getString(_passwordKey) ?? _defaultPassword;
     if (baseUrl.isEmpty || username.isEmpty || password.isEmpty) return null;
 
     return XtreamCredentials(
