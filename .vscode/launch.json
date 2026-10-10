@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // Browser storage is scoped to the origin, so a random port per run means
+      // saved credentials, favourites and pins vanish on every restart.
+      "name": "xtream_player (Chrome)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "deviceId": "chrome",
+      "args": ["--web-port", "60111"]
+    },
+    {
+      "name": "xtream_player",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart"
+    }
+  ]
+}

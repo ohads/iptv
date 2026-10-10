@@ -80,6 +80,21 @@ void main() {
       expect(XtreamCredentials.normalize('   '), '');
     });
 
+    test('loads saved credentials after a restart', () async {
+      SharedPreferences.setMockInitialValues({
+        'xtream_server_url': 'https://line.example.com:8080/',
+        'xtream_username': 'user',
+        'xtream_password': 'pass&plus',
+      });
+
+      final credentials = await XtreamCredentials.load();
+
+      expect(credentials, isNotNull);
+      expect(credentials!.baseUrl, 'https://line.example.com:8080');
+      expect(credentials.username, 'user');
+      expect(credentials.password, 'pass&plus');
+    });
+
     test('builds live, movie and episode URLs from the account details', () {
       const credentials = XtreamCredentials(
         baseUrl: 'http://line.example.com:8080',
@@ -159,6 +174,55 @@ void main() {
     test('omits the catch-all when every category is prefixed', () {
       final codes = groupCodesOf([named('EU | News'), named('AM | News')]);
       expect(codes, ['All', 'AM', 'EU']);
+    });
+  });
+
+  group('channels near', () {
+    LiveChannel channel(String id, String name, String categoryId) =>
+        LiveChannel(
+          id: id,
+          name: name,
+          categoryId: categoryId,
+          category: categoryId,
+          streamUrl: '',
+          logo: '',
+        );
+
+    AppData appData(List<XtreamCategory> categories, List<LiveChannel> channels) =>
+        AppData(
+          credentials: null,
+          categories: categories,
+          channels: channels,
+          movies: const [],
+          series: const [],
+          warnings: const [],
+        );
+
+    List<String> ids((String?, List<LiveChannel>) near) =>
+        [for (final c in near.$2) c.id];
+
+    test('matches the Live tab category chip for the channel', () {
+      final data = appData(
+        [
+          XtreamCategory(id: 'il', name: 'AS| ISRAEL'),
+          XtreamCategory(id: 'in', name: 'AS| INDIA'),
+          XtreamCategory(id: 'news', name: 'Documentaries'),
+        ],
+        [
+          channel('1', 'IL| Kan 11', 'il'),
+          channel('2', 'IL| Sport 5', 'il'),
+          channel('3', 'IN| Star Plus', 'in'),
+          channel('4', 'Nat Geo', 'news'),
+        ],
+      );
+
+      final israel = channelsNear(data, '1');
+      expect(israel.$1, 'AS › ISRAEL');
+      expect(ids(israel), ['1', '2']);
+
+      final unprefixed = channelsNear(data, '4');
+      expect(unprefixed.$1, 'Documentaries');
+      expect(ids(unprefixed), ['4']);
     });
   });
 
@@ -370,6 +434,29 @@ void main() {
 
     expect(find.widgetWithText(InputChip, 'AR | Kids'), findsNothing);
     expect(find.text('Pinned'), findsNothing);
+  });
+
+  testWidgets('continue watching items can be removed',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues({
+      'flutter.recently_watched': <String>['bbc', 'cnn'],
+    });
+    await pumpApp(tester);
+
+    expect(find.text('Continue Watching'), findsOneWidget);
+    final removeButtons = find.byTooltip('Remove from Continue Watching');
+    expect(removeButtons, findsNWidgets(2));
+
+    await tester.tap(removeButtons.first);
+    await tester.pump();
+    expect(removeButtons, findsOneWidget);
+
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getStringList('recently_watched'), ['cnn']);
+
+    await tester.tap(removeButtons.first);
+    await tester.pump();
+    expect(find.text('Continue Watching'), findsNothing);
   });
 
   group('EpgProgram', () {

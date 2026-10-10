@@ -9,12 +9,17 @@ import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
 
+import 'browser_fullscreen_stub.dart'
+    if (dart.library.js_interop) 'browser_fullscreen_web.dart';
+
 const _serverUrlKey = 'xtream_server_url';
 const _usernameKey = 'xtream_username';
 const _passwordKey = 'xtream_password';
 const _recentlyWatchedKey = 'recently_watched';
 const _favoritesKey = 'favorite_channels';
 const _pinnedCategoriesKey = 'pinned_categories';
+const _volumeKey = 'player_volume';
+const _mutedKey = 'player_muted';
 
 void main() {
   runApp(const XtreamPlayerApp());
@@ -116,16 +121,31 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() => _recentlyWatched = trimmed);
   }
 
+  Future<void> _removeFromRecentlyWatched(String channelId) async {
+    final updated = [..._recentlyWatched]..remove(channelId);
+
+    final prefs = await _prefsOrNull();
+    await prefs?.setStringList(_recentlyWatchedKey, updated);
+    if (!mounted) return;
+    setState(() => _recentlyWatched = updated);
+  }
+
   Future<void> _openPlayer(BuildContext context, AppData data, Playable playable) async {
     final navigator = Navigator.of(context);
     if (playable.isLive) {
       await _addToRecentlyWatched(playable.id);
     }
+    final (title, channels) = playable.isLive
+        ? channelsNear(data, playable.id)
+        : (null, const <LiveChannel>[]);
     await navigator.push(
       MaterialPageRoute<void>(
         builder: (context) => PlayerScreen(
           playable: playable,
           credentials: data.credentials,
+          channels: channels,
+          channelsTitle: title,
+          onChannelChanged: (channel) => _addToRecentlyWatched(channel.id),
         ),
       ),
     );
@@ -240,6 +260,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         recentlyWatched: _recentlyWatched,
                         pinnedCategories: _pinnedCategories,
                         onTogglePin: _togglePinnedCategory,
+                        onRemoveRecent: _removeFromRecentlyWatched,
                         onOpen: (channel) =>
                             _openPlayer(context, data, channel.toPlayable()),
                       ),
@@ -468,6 +489,7 @@ class _LiveTab extends StatefulWidget {
     required this.recentlyWatched,
     required this.pinnedCategories,
     required this.onTogglePin,
+    required this.onRemoveRecent,
     required this.onOpen,
   });
 
@@ -478,6 +500,7 @@ class _LiveTab extends StatefulWidget {
   /// Ids of categories the user pinned for one-tap access.
   final Set<String> pinnedCategories;
   final void Function(String categoryId) onTogglePin;
+  final void Function(String channelId) onRemoveRecent;
   final void Function(LiveChannel channel) onOpen;
 
   @override
@@ -485,6 +508,30 @@ class _LiveTab extends StatefulWidget {
 }
 
 const String _allFilter = 'All';
+
+/// The channels the Live tab would show with [channelId]'s category chip
+/// selected, labelled the way that chip reads, e.g. "AS › ISRAEL".
+(String?, List<LiveChannel>) channelsNear(AppData data, String channelId) {
+  final current = data.channels.where((c) => c.id == channelId).firstOrNull;
+  if (current == null) return (null, const []);
+
+  final category = data.categories
+      .where((c) => c.id == current.categoryId)
+      .firstOrNull;
+  final title = category == null
+      ? current.category
+      : category.group == XtreamCategory.ungrouped
+      ? category.shortName
+      : '${category.group} › ${category.shortName}';
+
+  return (
+    title,
+    [
+      for (final c in data.channels)
+        if (c.categoryId == current.categoryId) c,
+    ],
+  );
+}
 
 /// The distinct region codes across [categories], ordered for display: an
 /// "All" entry first, then codes alphabetically, with the catch-all bucket
@@ -516,17 +563,25 @@ class _ChipRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final controller = ScrollController();
+
     return SizedBox(
       height: 42,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        itemCount: values.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 8),
-        itemBuilder: (context, index) => ChoiceChip(
-          label: Text(labels[index]),
-          selected: selected == values[index],
-          onSelected: (_) => onSelected(values[index]),
+      child: Scrollbar(
+        controller: controller,
+        thumbVisibility: true,
+        trackVisibility: true,
+        child: ListView.separated(
+          controller: controller,
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          itemCount: values.length,
+          separatorBuilder: (_, _) => const SizedBox(width: 8),
+          itemBuilder: (context, index) => ChoiceChip(
+            label: Text(labels[index]),
+            selected: selected == values[index],
+            onSelected: (_) => onSelected(values[index]),
+          ),
         ),
       ),
     );
@@ -598,33 +653,44 @@ class _LiveTabState extends State<_LiveTab> {
         if (pinned.isNotEmpty && query.isEmpty) ...[
           const SliverToBoxAdapter(child: _SectionHeader('Pinned')),
           SliverToBoxAdapter(
-            child: SizedBox(
-              height: 42,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                itemCount: pinned.length,
-                separatorBuilder: (_, _) => const SizedBox(width: 8),
-                itemBuilder: (context, index) {
-                  final category = pinned[index];
-                  return InputChip(
-                    avatar: const Icon(
-                      Icons.star,
-                      size: 16,
-                      color: Colors.amber,
+            child: Builder(
+              builder: (context) {
+                final controller = ScrollController();
+                return SizedBox(
+                  height: 42,
+                  child: Scrollbar(
+                    controller: controller,
+                    thumbVisibility: true,
+                    trackVisibility: true,
+                    child: ListView.separated(
+                      controller: controller,
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      itemCount: pinned.length,
+                      separatorBuilder: (_, _) => const SizedBox(width: 8),
+                      itemBuilder: (context, index) {
+                        final category = pinned[index];
+                        return InputChip(
+                          avatar: const Icon(
+                            Icons.star,
+                            size: 16,
+                            color: Colors.amber,
+                          ),
+                          // Full name, not shortName: pins span regions, so
+                          // "ISRAEL" alone would be ambiguous.
+                          label: Text(category.name),
+                          selected: categoryId == category.id,
+                          onPressed: () => _jumpTo(category),
+                          onDeleted: () => widget.onTogglePin(category.id),
+                          deleteIcon: const Icon(Icons.close, size: 16),
+                          deleteButtonTooltipMessage:
+                              'Remove ${category.name} from pinned',
+                        );
+                      },
                     ),
-                    // Full name, not shortName: pins span regions, so
-                    // "ISRAEL" alone would be ambiguous.
-                    label: Text(category.name),
-                    selected: categoryId == category.id,
-                    onPressed: () => _jumpTo(category),
-                    onDeleted: () => widget.onTogglePin(category.id),
-                    deleteIcon: const Icon(Icons.close, size: 16),
-                    deleteButtonTooltipMessage:
-                        'Remove ${category.name} from pinned',
-                  );
-                },
-              ),
+                  ),
+                );
+              },
             ),
           ),
         ],
@@ -641,6 +707,8 @@ class _LiveTabState extends State<_LiveTab> {
                 itemBuilder: (context, index) => _RecentlyWatchedCard(
                   channel: recentChannels[index],
                   onTap: () => widget.onOpen(recentChannels[index]),
+                  onRemove: () =>
+                      widget.onRemoveRecent(recentChannels[index].id),
                 ),
               ),
             ),
@@ -732,10 +800,15 @@ class _LiveTabState extends State<_LiveTab> {
 }
 
 class _RecentlyWatchedCard extends StatelessWidget {
-  const _RecentlyWatchedCard({required this.channel, required this.onTap});
+  const _RecentlyWatchedCard({
+    required this.channel,
+    required this.onTap,
+    required this.onRemove,
+  });
 
   final LiveChannel channel;
   final VoidCallback onTap;
+  final VoidCallback onRemove;
 
   @override
   Widget build(BuildContext context) {
@@ -753,6 +826,22 @@ class _RecentlyWatchedCard extends StatelessWidget {
                 top: 4,
                 right: 4,
                 child: _Badge(label: 'LIVE'),
+              ),
+              Positioned(
+                top: 2,
+                left: 2,
+                child: IconButton(
+                  tooltip: 'Remove from Continue Watching',
+                  onPressed: onRemove,
+                  icon: const Icon(Icons.close, size: 14),
+                  style: IconButton.styleFrom(
+                    backgroundColor: Colors.black54,
+                    foregroundColor: Colors.white,
+                    minimumSize: const Size(24, 24),
+                    padding: EdgeInsets.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
               ),
               Positioned(
                 left: 4,
@@ -1469,11 +1558,21 @@ class PlayerScreen extends StatefulWidget {
     super.key,
     required this.playable,
     required this.credentials,
+    this.channels = const [],
+    this.channelsTitle,
+    this.onChannelChanged,
     this.initTimeout = const Duration(seconds: 12),
   });
 
   final Playable playable;
   final XtreamCredentials? credentials;
+
+  /// Channels to offer alongside the player, e.g. the rest of the country.
+  final List<LiveChannel> channels;
+  final String? channelsTitle;
+
+  /// Called when the user switches to another of [channels].
+  final ValueChanged<LiveChannel>? onChannelChanged;
 
   /// How long to wait on one source before moving to the next. Exposed so
   /// tests can exercise the give-up path without waiting out the real value.
@@ -1485,14 +1584,31 @@ class PlayerScreen extends StatefulWidget {
 
 class _PlayerScreenState extends State<PlayerScreen> {
   VideoPlayerController? _controller;
+
+  /// Starts as the widget's, then follows whatever the channel list picks.
+  late Playable _playable = widget.playable;
   Future<List<EpgProgram>>? _guideFuture;
+
+  /// Lets the player move between the inline and fullscreen layouts without
+  /// being rebuilt. On web the video is a real `<video>` element, and the
+  /// browser pauses it the moment it is detached from the page.
+  final _playerKey = GlobalKey();
+
+  late final void Function() _stopFullscreenListener;
 
   bool _isInitialized = false;
   bool _isFullscreen = false;
   bool _showControls = true;
+  Timer? _hideControlsTimer;
+  static const _hideControlsAfter = Duration(seconds: 3);
   bool _isFavorite = false;
   bool _wasPlaying = false;
   bool _wasBuffering = false;
+
+  /// Kept separately from the controller so it survives channel switches and
+  /// retries, which each build a fresh controller at full volume.
+  double _volume = 1.0;
+  bool _isMuted = false;
   String? _error;
   String _status = 'Connecting…';
   int _attempt = 0;
@@ -1500,16 +1616,81 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void initState() {
     super.initState();
+    _stopFullscreenListener = listenBrowserFullscreen((isFullscreen) {
+      // Esc exits browser fullscreen without going through our button.
+      if (!isFullscreen && _isFullscreen && mounted) _toggleFullscreen();
+    });
     _initialisePlayer();
     _loadFavorite();
-    if (widget.playable.isLive && widget.playable.epgStreamId != null) {
-      _guideFuture = XtreamService()
-          .loadGuide(widget.credentials, widget.playable.epgStreamId!);
-    }
+    _loadVolume();
+    _loadGuide();
+  }
+
+  Future<void> _loadVolume() async {
+    final prefs = await _prefsOrNull();
+    if (prefs == null || !mounted) return;
+    setState(() {
+      _volume = (prefs.getDouble(_volumeKey) ?? 1.0).clamp(0.0, 1.0);
+      _isMuted = prefs.getBool(_mutedKey) ?? false;
+    });
+    _applyVolume();
+  }
+
+  void _applyVolume() {
+    _controller?.setVolume(_isMuted ? 0.0 : _volume);
+  }
+
+  void _setVolume(double volume) {
+    setState(() {
+      _volume = volume;
+      // Moving the slider overrides mute; dragging it to zero is muting.
+      _isMuted = volume == 0;
+    });
+    _applyVolume();
+    // Keep the bar up while the slider is being dragged.
+    _revealControls();
+  }
+
+  /// Saved on release rather than per slider tick to avoid a write per frame.
+  Future<void> _saveVolume() async {
+    final prefs = await _prefsOrNull();
+    if (prefs == null) return;
+    await prefs.setDouble(_volumeKey, _volume);
+    await prefs.setBool(_mutedKey, _isMuted);
+  }
+
+  void _toggleMute() {
+    setState(() {
+      _isMuted = !_isMuted;
+      // Unmuting at zero would look like the button did nothing.
+      if (!_isMuted && _volume == 0) _volume = 0.5;
+    });
+    _applyVolume();
+    _revealControls();
+    _saveVolume();
+  }
+
+  void _loadGuide() {
+    _guideFuture = _playable.isLive && _playable.epgStreamId != null
+        ? XtreamService().loadGuide(widget.credentials, _playable.epgStreamId!)
+        : null;
+  }
+
+  void _switchTo(LiveChannel channel) {
+    if (channel.id == _playable.id) return;
+    setState(() {
+      _playable = channel.toPlayable();
+      _isFavorite = false;
+      _showControls = true;
+      _loadGuide();
+    });
+    _loadFavorite();
+    widget.onChannelChanged?.call(channel);
+    _retry();
   }
 
   Future<void> _initialisePlayer() async {
-    final candidates = widget.playable.candidateUrls;
+    final candidates = _playable.candidateUrls;
     if (candidates.isEmpty) {
       setState(() => _error = 'This item does not have a playable stream URL.');
       return;
@@ -1548,8 +1729,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
         }
         _controller = controller;
         controller.addListener(_onPlaybackUpdate);
+        await controller.setVolume(_isMuted ? 0.0 : _volume);
         setState(() => _isInitialized = true);
-        await controller.play();
+        await controller.play().timeout(const Duration(seconds: 8));
         return;
       } on TimeoutException {
         await _disposeQuietly(controller);
@@ -1589,10 +1771,39 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
 
     if (value.isPlaying != _wasPlaying || value.isBuffering != _wasBuffering) {
+      final startedPlaying = value.isPlaying && !_wasPlaying;
       setState(() {
         _wasPlaying = value.isPlaying;
         _wasBuffering = value.isBuffering;
       });
+      // Driven from here rather than the play button so Space, the
+      // fullscreen resume and a live reconnect all behave the same.
+      if (startedPlaying) {
+        _revealControls();
+      } else if (!value.isPlaying) {
+        _hideControlsTimer?.cancel();
+        setState(() => _showControls = true);
+      }
+    }
+  }
+
+  /// Shows the controls and restarts the countdown to hide them again.
+  void _revealControls() {
+    if (!_showControls) setState(() => _showControls = true);
+    _hideControlsTimer?.cancel();
+    _hideControlsTimer = Timer(_hideControlsAfter, () {
+      // Paused or still loading: the controls are what the viewer needs.
+      if (!mounted || !(_controller?.value.isPlaying ?? false)) return;
+      setState(() => _showControls = false);
+    });
+  }
+
+  void _onPlayerTap() {
+    if (_showControls && (_controller?.value.isPlaying ?? false)) {
+      _hideControlsTimer?.cancel();
+      setState(() => _showControls = false);
+    } else {
+      _revealControls();
     }
   }
 
@@ -1617,17 +1828,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
     setState(() {
       _error = null;
       _isInitialized = false;
+      // So the new controller's first play counts as a start and kicks off
+      // the auto-hide countdown.
+      _wasPlaying = false;
       _status = 'Connecting…';
     });
     await _initialisePlayer();
   }
 
   Future<void> _loadFavorite() async {
-    if (!widget.playable.isLive) return;
+    if (!_playable.isLive) return;
     final prefs = await _prefsOrNull();
     if (prefs == null || !mounted) return;
     final favorites = prefs.getStringList(_favoritesKey) ?? [];
-    setState(() => _isFavorite = favorites.contains(widget.playable.id));
+    setState(() => _isFavorite = favorites.contains(_playable.id));
   }
 
   Future<void> _toggleFavorite() async {
@@ -1638,29 +1852,90 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (prefs == null) return;
     final favorites = (prefs.getStringList(_favoritesKey) ?? []).toSet();
     if (next) {
-      favorites.add(widget.playable.id);
+      favorites.add(_playable.id);
     } else {
-      favorites.remove(widget.playable.id);
+      favorites.remove(_playable.id);
     }
     await prefs.setStringList(_favoritesKey, favorites.toList());
   }
 
+  Future<void> _applyFullscreenMode(bool enable) async {
+    // First, before any await: the browser only honours fullscreen requests
+    // made synchronously inside the click handler.
+    final browser = setBrowserFullscreen(enable);
+
+    final orientations = enable
+        ? <DeviceOrientation>[
+            DeviceOrientation.landscapeLeft,
+            DeviceOrientation.landscapeRight,
+          ]
+        : <DeviceOrientation>[
+            DeviceOrientation.portraitUp,
+            DeviceOrientation.portraitDown,
+          ];
+
+    await SystemChrome.setPreferredOrientations(orientations);
+    await SystemChrome.setEnabledSystemUIMode(
+      enable ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
+    );
+    await browser;
+  }
+
   @override
   void dispose() {
+    _hideControlsTimer?.cancel();
+    _stopFullscreenListener();
+    unawaited(_applyFullscreenMode(false));
     _controller?.removeListener(_onPlaybackUpdate);
     _controller?.dispose();
     super.dispose();
   }
 
-  void _toggleFullscreen() => setState(() => _isFullscreen = !_isFullscreen);
+  void _toggleFullscreen() {
+    final next = !_isFullscreen;
+    final wasPlaying = _controller?.value.isPlaying ?? false;
+    setState(() => _isFullscreen = next);
+    unawaited(_applyFullscreenMode(next));
+
+    // Belt and braces: if the platform still paused the video during the
+    // layout switch, the controller would keep reporting it as playing and
+    // the picture would sit frozen.
+    if (wasPlaying) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _controller?.play();
+      });
+    }
+  }
+
+  Widget _buildPlayer() {
+    // The key sits on the outermost widget so moving between layouts keeps
+    // the whole subtree, video element included, intact.
+    return MouseRegion(
+      key: _playerKey,
+      onHover: (_) => _revealControls(),
+      // Hide the pointer along with the controls so nothing sits over the
+      // picture.
+      cursor: _showControls ? MouseCursor.defer : SystemMouseCursors.none,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          _buildVideoSurface(),
+          // Pinned to the video's bounds so the title sits at the top edge and
+          // the progress bar and buttons at the bottom, rather than the overlay
+          // shrinking to its content and floating mid-picture.
+          Positioned.fill(child: _buildPlayerControls()),
+        ],
+      ),
+    );
+  }
 
   Widget _buildVideoSurface() {
     if (_error != null) {
       return _PlaybackError(
-        title: widget.playable.title,
+        title: _playable.title,
         message: _error!,
         attemptedUrls: [
-          for (final url in widget.playable.candidateUrls) _redact(url),
+          for (final url in _playable.candidateUrls) _redact(url),
         ],
         onRetry: _retry,
       );
@@ -1697,8 +1972,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final controller = _controller;
     if (controller == null || !_isInitialized) return const SizedBox.shrink();
 
-    return Visibility(
-      visible: _showControls,
+    // IgnorePointer rather than Visibility: removing the overlay outright
+    // would cut the fade-out short.
+    return IgnorePointer(
+      ignoring: !_showControls,
       child: AnimatedOpacity(
         opacity: _showControls ? 1.0 : 0.0,
         duration: const Duration(milliseconds: 300),
@@ -1731,7 +2008,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       const SizedBox(width: 48),
                     Expanded(
                       child: Text(
-                        widget.playable.title,
+                        _playable.title,
                         style: const TextStyle(
                           color: Colors.white,
                           fontSize: 14,
@@ -1755,19 +2032,32 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 padding: const EdgeInsets.symmetric(horizontal: 12),
                 child: Column(
                   children: [
-                    VideoProgressIndicator(
-                      controller,
-                      allowScrubbing: !widget.playable.isLive,
-                      colors: VideoProgressColors(
-                        playedColor: Colors.red,
-                        backgroundColor: Colors.grey.shade700,
-                        bufferedColor: Colors.grey.shade600,
+                    // A live stream has no fixed length, so the bar would
+                    // only show the local buffer, which tells the viewer
+                    // nothing. Movies keep it as a seek bar.
+                    if (!_playable.isLive) ...[
+                      VideoProgressIndicator(
+                        controller,
+                        allowScrubbing: true,
+                        colors: VideoProgressColors(
+                          playedColor: Colors.red,
+                          backgroundColor: Colors.grey.shade700,
+                          bufferedColor: Colors.grey.shade600,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 12),
+                      const SizedBox(height: 12),
+                    ],
                     Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
                       children: [
+                        // Volume on the left, play/pause centred: the two
+                        // Expanded sides keep the play button in the middle
+                        // however wide the slider is.
+                        Expanded(
+                          child: Align(
+                            alignment: Alignment.centerLeft,
+                            child: _buildVolumeControl(),
+                          ),
+                        ),
                         IconButton(
                           icon: Icon(
                             controller.value.isPlaying
@@ -1776,14 +2066,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
                             color: Colors.white,
                             size: 32,
                           ),
-                          onPressed: () {
-                            if (controller.value.isPlaying) {
-                              controller.pause();
-                            } else {
-                              controller.play();
-                            }
-                          },
+                          onPressed: _togglePlayPause,
                         ),
+                        const Expanded(child: SizedBox()),
                       ],
                     ),
                   ],
@@ -1796,45 +2081,122 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
   }
 
+  void _togglePlayPause() {
+    final controller = _controller;
+    if (controller == null) return;
+
+    if (controller.value.isPlaying) {
+      controller.pause();
+    } else if (_playable.isLive) {
+      // Xtream servers drop an idle live connection within seconds, so the
+      // paused player has nothing left to resume from and just freezes.
+      // Reconnecting rejoins the channel at the live edge, which is what a
+      // viewer expects from live TV anyway.
+      _retry();
+    } else {
+      controller.play();
+    }
+  }
+
+  Widget _buildVolumeControl() {
+    final effective = _isMuted ? 0.0 : _volume;
+    final icon = effective == 0
+        ? Icons.volume_off
+        : effective < 0.5
+            ? Icons.volume_down
+            : Icons.volume_up;
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          icon: Icon(icon),
+          color: Colors.white,
+          tooltip: _isMuted ? 'Unmute' : 'Mute',
+          onPressed: _toggleMute,
+        ),
+        // Flexible so the slider gives way on a narrow phone screen instead
+        // of overflowing into the play button.
+        Flexible(
+          child: SizedBox(
+            width: 120,
+            child: SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                trackHeight: 2,
+                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+                overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
+                activeTrackColor: Colors.white,
+                inactiveTrackColor: Colors.white38,
+                thumbColor: Colors.white,
+              ),
+              child: Slider(
+                value: effective,
+                onChanged: _setVolume,
+                onChangeEnd: (_) => _saveVolume(),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Wraps both layouts so the shortcut keeps working across fullscreen
+    // toggles. Key events bubble up from whatever has focus, so this sees
+    // them even after a click has moved focus onto one of the buttons.
+    return Focus(
+      autofocus: true,
+      onKeyEvent: (node, event) {
+        if (event is KeyDownEvent &&
+            event.logicalKey == LogicalKeyboardKey.space) {
+          _togglePlayPause();
+          // Handled, so a focused button doesn't also activate on Space and
+          // the browser doesn't scroll the page.
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
+      child: _buildScreen(context),
+    );
+  }
+
+  Widget _buildScreen(BuildContext context) {
     if (_isFullscreen) {
       return Scaffold(
         backgroundColor: Colors.black,
         body: GestureDetector(
-          onTap: () => setState(() => _showControls = !_showControls),
-          child: Stack(
-            children: [
-              Center(child: _buildVideoSurface()),
-              _buildPlayerControls(),
-            ],
-          ),
+          onTap: _onPlayerTap,
+          child: Center(child: _buildPlayer()),
         ),
       );
     }
 
-    return Scaffold(
-      appBar: AppBar(title: Text(widget.playable.title)),
-      body: SafeArea(
-        child: SingleChildScrollView(
+    final details = SingleChildScrollView(
           child: Padding(
             padding: const EdgeInsets.all(16),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                GestureDetector(
-                  onTap: () => setState(() => _showControls = !_showControls),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(18),
-                      color: Colors.black,
+                Center(
+                  child: ConstrainedBox(
+                    // Full width on a phone, but on a wide browser window a
+                    // full-width 16:9 player would push everything off-screen.
+                    constraints: BoxConstraints(
+                      maxWidth:
+                          MediaQuery.sizeOf(context).height * 0.6 * 16 / 9,
                     ),
-                    clipBehavior: Clip.antiAlias,
-                    child: Stack(
-                      children: [
-                        _buildVideoSurface(),
-                        _buildPlayerControls(),
-                      ],
+                    child: GestureDetector(
+                      onTap: _onPlayerTap,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(18),
+                          color: Colors.black,
+                        ),
+                        clipBehavior: Clip.antiAlias,
+                        child: _buildPlayer(),
+                      ),
                     ),
                   ),
                 ),
@@ -1846,7 +2208,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            widget.playable.title,
+                            _playable.title,
                             style: const TextStyle(
                               fontSize: 24,
                               fontWeight: FontWeight.w700,
@@ -1855,7 +2217,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                           const SizedBox(height: 4),
                           Row(
                             children: [
-                              if (widget.playable.isLive) ...[
+                              if (_playable.isLive) ...[
                                 Container(
                                   padding: const EdgeInsets.symmetric(
                                     horizontal: 8,
@@ -1884,7 +2246,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                               ],
                               Expanded(
                                 child: Text(
-                                  widget.playable.subtitle,
+                                  _playable.subtitle,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(color: Colors.grey.shade400),
@@ -1895,7 +2257,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                         ],
                       ),
                     ),
-                    if (widget.playable.isLive)
+                    if (_playable.isLive)
                       IconButton(
                         tooltip: _isFavorite
                             ? 'Remove from favourites'
@@ -1920,8 +2282,98 @@ class _PlayerScreenState extends State<PlayerScreen> {
               ],
             ),
           ),
+        );
+
+    return Scaffold(
+      appBar: AppBar(title: Text(_playable.title)),
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            // Only beside the player: on a narrow screen the list would push
+            // the guide out of sight.
+            final hasRoom = constraints.maxWidth >= 1000;
+            if (!hasRoom || widget.channels.length < 2) return details;
+
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(child: details),
+                const VerticalDivider(width: 1),
+                SizedBox(
+                  width: 320,
+                  child: _ChannelSidebar(
+                    title: widget.channelsTitle,
+                    channels: widget.channels,
+                    currentId: _playable.id,
+                    onSelected: _switchTo,
+                  ),
+                ),
+              ],
+            );
+          },
         ),
       ),
+    );
+  }
+}
+
+class _ChannelSidebar extends StatelessWidget {
+  const _ChannelSidebar({
+    required this.title,
+    required this.channels,
+    required this.currentId,
+    required this.onSelected,
+  });
+
+  final String? title;
+  final List<LiveChannel> channels;
+  final String currentId;
+  final ValueChanged<LiveChannel> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _SectionHeader(
+          title ?? 'Channels',
+          trailing: '${channels.length}',
+        ),
+        Expanded(
+          child: ListView.builder(
+            itemCount: channels.length,
+            itemBuilder: (context, index) {
+              final channel = channels[index];
+              return ListTile(
+                selected: channel.id == currentId,
+                selectedTileColor: Colors.white.withValues(alpha: 0.08),
+                leading: ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: SizedBox(
+                    width: 56,
+                    height: 36,
+                    child: _Artwork(
+                      url: channel.logo,
+                      fallbackIcon: Icons.live_tv,
+                    ),
+                  ),
+                ),
+                title: Text(
+                  channel.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: Text(
+                  channel.category,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                onTap: () => onSelected(channel),
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 }
